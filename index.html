@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Clark Nissan Abilene — Lot Tracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --asphalt:#17191c; --panel:#212429; --line:#3a3f47;
+    --chrome:#aab2ba; --chrome-dim:#767d85; --paper:#f2efe8;
+    --amber:#f2a63c; --signal:#d1483f; --green:#5fa876;
+  }
+  *{box-sizing:border-box;}
+  body{ margin:0; background:var(--asphalt); color:var(--paper); font-family:'Inter',sans-serif; }
+  .marquee{ background:linear-gradient(180deg,#1d2024,#17191c); border-bottom:3px solid var(--amber); padding:22px 24px 18px; position:sticky; top:0; z-index:20; }
+  .marquee-inner{ max-width:1200px; margin:0 auto; display:flex; align-items:center; gap:18px; flex-wrap:wrap; }
+  .logo-wrap{ background:var(--paper); border-radius:4px; padding:6px 10px; display:flex; align-items:center; min-height:44px; }
+  .logo-wrap img{ max-height:36px; max-width:180px; display:block; }
+  .logo-fallback{ font-family:'Oswald',sans-serif; font-weight:700; color:var(--asphalt); font-size:18px; text-transform:uppercase; }
+  .marquee-title h1{ font-family:'Oswald',sans-serif; font-weight:600; font-size:22px; margin:0; letter-spacing:.03em; text-transform:uppercase; }
+  .marquee-title .sub{ color:var(--chrome); font-size:12.5px; margin-top:3px; }
+  .marquee-stats{ display:flex; gap:22px; margin-left:auto; }
+  .stat{ text-align:right; }
+  .stat .num{ font-family:'IBM Plex Mono',monospace; font-size:22px; font-weight:600; color:var(--amber); line-height:1; }
+  .stat .lbl{ font-size:10.5px; color:var(--chrome-dim); text-transform:uppercase; letter-spacing:.08em; margin-top:4px; }
+  .controls{ max-width:1200px; margin:0 auto; padding:16px 24px 0; display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+  select, input[type=text]{ background:var(--panel); border:1px solid var(--line); color:var(--paper); padding:8px 12px; border-radius:2px; font-family:'Inter',sans-serif; font-size:13px; }
+  input[type=text]{ min-width:180px; }
+  .updated-line{ font-size:12px; color:var(--chrome-dim); margin-left:auto; }
+  .diffbar{ max-width:1200px; margin:14px auto 0; padding:0 24px; display:flex; gap:10px; flex-wrap:wrap; }
+  .pill{ font-size:12px; font-weight:600; padding:6px 12px; border-radius:20px; }
+  .pill.new{ background:rgba(95,168,118,.15); color:var(--green); border:1px solid rgba(95,168,118,.4); }
+  .pill.sold{ background:rgba(209,72,63,.15); color:#e78a83; border:1px solid rgba(209,72,63,.4); }
+  .pill.drop{ background:rgba(242,166,60,.15); color:var(--amber); border:1px solid rgba(242,166,60,.4); }
+  .content{ max-width:1200px; margin:0 auto; padding:20px 24px 60px; }
+  .empty{ text-align:center; padding:80px 20px; color:var(--chrome); }
+  .empty h2{ font-family:'Oswald',sans-serif; color:var(--paper); font-size:22px; text-transform:uppercase; }
+  .empty p{ max-width:480px; margin:10px auto; font-size:14px; line-height:1.6; color:var(--chrome-dim); }
+  .group{ margin-bottom:34px; }
+  .group-head{ display:flex; align-items:baseline; gap:10px; margin-bottom:12px; border-bottom:1px solid var(--line); padding-bottom:8px; }
+  .group-head h2{ font-family:'Oswald',sans-serif; font-size:16px; text-transform:uppercase; letter-spacing:.05em; margin:0; font-weight:600; }
+  .group-head .count{ color:var(--chrome-dim); font-size:12.5px; font-family:'IBM Plex Mono',monospace; }
+  .grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(255px,1fr)); gap:14px; }
+  .card{ background:var(--panel); border:1px solid var(--line); border-radius:3px; padding:14px; display:flex; flex-direction:column; gap:8px; }
+  .card:hover{ border-color:var(--chrome-dim); }
+  .card-title{ font-family:'Oswald',sans-serif; font-size:14.5px; font-weight:600; }
+  .card-trim{ color:var(--chrome); font-size:12px; margin-top:2px; }
+  .badges{ display:flex; flex-wrap:wrap; gap:5px; }
+  .badge{ font-size:9.5px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; padding:2px 6px; border-radius:2px; }
+  .badge.new{ background:var(--green); color:#0e1a12; }
+  .badge.sold{ background:var(--signal); color:#2a0d0a; }
+  .badge.drop{ background:var(--amber); color:#2a1c04; }
+  .badge.cpo{ background:var(--chrome); color:#1a1c1f; }
+  .price-row{ display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
+  .price{ font-family:'IBM Plex Mono',monospace; font-size:22px; font-weight:600; color:var(--amber); }
+  .price.sold-out{ color:var(--chrome-dim); text-decoration:line-through; }
+  .price-was{ font-size:12px; color:var(--chrome-dim); text-decoration:line-through; }
+  .price-delta{ font-size:11.5px; font-family:'IBM Plex Mono',monospace; }
+  .price-delta.down{ color:var(--green); } .price-delta.up{ color:var(--signal); }
+  .meta{ display:grid; grid-template-columns:1fr 1fr; gap:4px 10px; font-size:11.5px; color:var(--chrome); }
+  .meta b{ color:var(--paper); font-weight:500; }
+  .vin-row{ font-family:'IBM Plex Mono',monospace; font-size:10.5px; letter-spacing:.04em; color:var(--chrome-dim); border-top:1px solid var(--line); padding-top:8px; display:flex; justify-content:space-between; }
+  .card a.viewlink{ text-align:center; font-size:11.5px; font-weight:600; color:var(--asphalt); background:var(--chrome); text-decoration:none; padding:7px; border-radius:2px; letter-spacing:.03em; text-transform:uppercase; }
+  .card a.viewlink:hover{ background:var(--paper); }
+  .history{ margin-top:40px; border-top:1px solid var(--line); padding-top:18px; }
+  .history h3{ font-family:'Oswald',sans-serif; font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--chrome-dim); margin:0 0 10px; }
+  .history-row{ display:flex; gap:16px; font-size:12px; color:var(--chrome); padding:6px 0; border-bottom:1px solid #2a2d33; font-family:'IBM Plex Mono',monospace; }
+  @media (max-width:600px){ .marquee-stats{ display:none; } .meta{ grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+
+<div class="marquee">
+  <div class="marquee-inner">
+    <div class="logo-wrap">
+      <img id="dealerLogo" src="https://service.secureoffersites.com/images/GetLibraryImage?fileNameOrId=158963&Width=0&Height=0&logo=y" alt="Clark Nissan logo"
+           onerror="this.style.display='none'; document.getElementById('logoFallback').style.display='block';">
+      <div id="logoFallback" class="logo-fallback" style="display:none;">CLARK NISSAN</div>
+    </div>
+    <div class="marquee-title">
+      <h1>Lot Tracker</h1>
+      <div class="sub">Clark Nissan of Abilene · 818 E Overland Trail, Abilene, TX</div>
+    </div>
+    <div class="marquee-stats">
+      <div class="stat"><div class="num" id="statTotal">–</div><div class="lbl">On Lot</div></div>
+      <div class="stat"><div class="num" id="statAvgPrice">–</div><div class="lbl">Avg Price</div></div>
+      <div class="stat"><div class="num" id="statAvgMiles">–</div><div class="lbl">Avg Miles</div></div>
+    </div>
+  </div>
+</div>
+
+<div class="controls">
+  <select id="groupBy">
+    <option value="body_type">Group: Body Type</option>
+    <option value="make">Group: Make</option>
+    <option value="model">Group: Model</option>
+    <option value="inventory_type">Group: New / Used</option>
+  </select>
+  <select id="sortBy">
+    <option value="price_asc">Sort: Price ↑</option>
+    <option value="price_desc">Sort: Price ↓</option>
+    <option value="mileage_asc">Sort: Mileage ↑</option>
+    <option value="year_desc">Sort: Newest Year</option>
+  </select>
+  <input type="text" id="searchBox" placeholder="Search year, make, model, VIN…">
+  <span class="updated-line" id="updatedLine"></span>
+</div>
+
+<div class="diffbar" id="diffBar"></div>
+
+<div class="content" id="content">
+  <div class="empty" id="emptyState">
+    <h2>Waiting on first scrape</h2>
+    <p>This page reads from <code>data/latest.json</code>, which the GitHub Action fills in automatically on its schedule. If you just set this up, trigger the workflow manually once from the Actions tab to populate it right away.</p>
+  </div>
+</div>
+
+<script>
+let latestData = null, previousData = null;
+let diffs = { added: [], removed: [], priceChanges: {} };
+
+async function fetchJSON(path){
+  const res = await fetch(path + '?_=' + Date.now());
+  if (!res.ok) throw new Error('not found: ' + path);
+  return res.json();
+}
+
+async function boot(){
+  let manifest;
+  try { manifest = await fetchJSON('data/manifest.json'); }
+  catch(e){ return; } // empty state stays up
+
+  if (!manifest.length) return;
+  try { latestData = await fetchJSON('data/' + manifest[0].file); } catch(e){ return; }
+  if (manifest.length > 1){
+    try { previousData = await fetchJSON('data/' + manifest[1].file); } catch(e){ previousData = null; }
+  }
+  computeDiffs();
+  render();
+  loadHistoryPanel(manifest);
+}
+
+function computeDiffs(){
+  diffs = { added: [], removed: [], priceChanges: {} };
+  if (!latestData) return;
+  const latestVins = new Set(latestData.vehicles.map(v => v.vin).filter(Boolean));
+  const prevByVin = {};
+  if (previousData) previousData.vehicles.forEach(v => { if (v.vin) prevByVin[v.vin] = v; });
+  latestData.vehicles.forEach(v => {
+    if (!v.vin) return;
+    if (!prevByVin[v.vin]) diffs.added.push(v.vin);
+    else {
+      const o = prevByVin[v.vin].selling_price, n = v.selling_price;
+      if (o != null && n != null && o !== n) diffs.priceChanges[v.vin] = { old: o, new: n };
+    }
+  });
+  if (previousData){
+    previousData.vehicles.forEach(v => { if (v.vin && !latestVins.has(v.vin)) diffs.removed.push(v); });
+  }
+}
+
+function fmtMoney(n){ return n == null ? '—' : '$' + n.toLocaleString(); }
+function fmtMiles(n){ return n == null ? '—' : n.toLocaleString() + ' mi'; }
+
+function vehicleCard(v){
+  const isNew = diffs.added.includes(v.vin);
+  const priceChange = diffs.priceChanges[v.vin];
+  const bodyLabel = v.body_type ? v.body_type.replace(/\b\w/g, c => c.toUpperCase()) : (v.inventory_type || '');
+  let badges = '';
+  if (isNew) badges += '<span class="badge new">New Arrival</span>';
+  if (v.certified) badges += '<span class="badge cpo">Certified</span>';
+  if (priceChange) badges += `<span class="badge drop">${priceChange.new < priceChange.old ? 'Price Drop' : 'Price Up'}</span>`;
+  let priceHtml = `<span class="price">${fmtMoney(v.selling_price)}</span>`;
+  if (priceChange){
+    const dir = priceChange.new < priceChange.old ? 'down' : 'up';
+    priceHtml += `<span class="price-was">${fmtMoney(priceChange.old)}</span>`;
+    priceHtml += `<span class="price-delta ${dir}">${dir==='down'?'↓':'↑'} ${fmtMoney(Math.abs(priceChange.new - priceChange.old))}</span>`;
+  }
+  return `
+  <div class="card">
+    <div><div class="card-title">${v.year||''} ${v.make||''} ${v.model||''}</div><div class="card-trim">${v.trim||bodyLabel||''}</div></div>
+    <div class="badges">${badges}</div>
+    <div class="price-row">${priceHtml}</div>
+    <div class="meta">
+      <div>Miles <b>${fmtMiles(v.mileage)}</b></div>
+      <div>Trans <b>${v.transmission||'—'}</b></div>
+      <div>Ext <b>${v.exterior_color||'—'}</b></div>
+      <div>Int <b>${v.interior_color||'—'}</b></div>
+    </div>
+    <div class="vin-row"><span>VIN ${v.vin||'—'}</span><span>#${v.stock||'—'}</span></div>
+    ${v.url ? `<a class="viewlink" href="${v.url}" target="_blank" rel="noopener">View Listing</a>` : ''}
+  </div>`;
+}
+
+function render(){
+  const empty = document.getElementById('emptyState');
+  const content = document.getElementById('content');
+  if (!latestData){ empty.style.display = 'block'; return; }
+  empty.style.display = 'none';
+
+  let vehicles = latestData.vehicles.slice();
+  const q = document.getElementById('searchBox').value.trim().toLowerCase();
+  if (q) vehicles = vehicles.filter(v => [v.year,v.make,v.model,v.trim,v.vin,v.stock].join(' ').toLowerCase().includes(q));
+
+  const sortBy = document.getElementById('sortBy').value;
+  vehicles.sort((a,b) => {
+    if (sortBy==='price_asc') return (a.selling_price||0)-(b.selling_price||0);
+    if (sortBy==='price_desc') return (b.selling_price||0)-(a.selling_price||0);
+    if (sortBy==='mileage_asc') return (a.mileage||0)-(b.mileage||0);
+    if (sortBy==='year_desc') return (b.year||0)-(a.year||0);
+    return 0;
+  });
+
+  const prices = vehicles.map(v=>v.selling_price).filter(n=>n!=null);
+  const miles = vehicles.map(v=>v.mileage).filter(n=>n!=null);
+  document.getElementById('statTotal').textContent = vehicles.length;
+  document.getElementById('statAvgPrice').textContent = prices.length ? '$'+Math.round(prices.reduce((a,b)=>a+b,0)/prices.length).toLocaleString() : '—';
+  document.getElementById('statAvgMiles').textContent = miles.length ? Math.round(miles.reduce((a,b)=>a+b,0)/miles.length).toLocaleString() : '—';
+  document.getElementById('updatedLine').textContent = 'Last scrape: ' + new Date(latestData.scraped_at).toLocaleString();
+
+  let pills = '';
+  if (diffs.added.length) pills += `<div class="pill new">▲ ${diffs.added.length} new arrival${diffs.added.length!==1?'s':''}</div>`;
+  if (diffs.removed.length) pills += `<div class="pill sold">● ${diffs.removed.length} sold / left lot</div>`;
+  if (Object.keys(diffs.priceChanges).length) pills += `<div class="pill drop">$ ${Object.keys(diffs.priceChanges).length} price change${Object.keys(diffs.priceChanges).length!==1?'s':''}</div>`;
+  document.getElementById('diffBar').innerHTML = pills;
+
+  const groupBy = document.getElementById('groupBy').value;
+  const groups = {};
+  vehicles.forEach(v => {
+    let key = String(v[groupBy] || 'Other').replace(/\b\w/g, c => c.toUpperCase());
+    (groups[key] = groups[key] || []).push(v);
+  });
+  const keys = Object.keys(groups).sort((a,b) => groups[b].length - groups[a].length);
+
+  Array.from(content.querySelectorAll('.group')).forEach(g => g.remove());
+  const oldHist = content.querySelector('.history'); if (oldHist) oldHist.remove();
+
+  keys.forEach(key => {
+    const div = document.createElement('div');
+    div.className = 'group';
+    div.innerHTML = `<div class="group-head"><h2>${key}</h2><span class="count">${groups[key].length} vehicle${groups[key].length!==1?'s':''}</span></div><div class="grid">${groups[key].map(vehicleCard).join('')}</div>`;
+    content.appendChild(div);
+  });
+
+  if (diffs.removed.length){
+    const div = document.createElement('div');
+    div.className = 'group';
+    div.innerHTML = `<div class="group-head"><h2>Recently Sold / Removed</h2><span class="count">${diffs.removed.length}</span></div><div class="grid">${diffs.removed.map(v => `
+      <div class="card">
+        <div><div class="card-title">${v.year||''} ${v.make||''} ${v.model||''}</div><div class="card-trim">${v.trim||''}</div></div>
+        <div class="badges"><span class="badge sold">Sold / Gone</span></div>
+        <div class="price-row"><span class="price sold-out">${fmtMoney(v.selling_price)}</span></div>
+        <div class="vin-row"><span>VIN ${v.vin||'—'}</span><span>#${v.stock||'—'}</span></div>
+      </div>`).join('')}</div>`;
+    content.appendChild(div);
+  }
+}
+
+function loadHistoryPanel(manifest){
+  if (!manifest.length) return;
+  const content = document.getElementById('content');
+  const div = document.createElement('div');
+  div.className = 'history';
+  div.innerHTML = `<h3>Scrape History</h3>` + manifest.map(h => `<div class="history-row"><span>${h.date}</span><span>${h.count} on lot</span></div>`).join('');
+  content.appendChild(div);
+}
+
+document.getElementById('groupBy').addEventListener('change', render);
+document.getElementById('sortBy').addEventListener('change', render);
+document.getElementById('searchBox').addEventListener('input', render);
+
+boot();
+</script>
+</body>
+</html>

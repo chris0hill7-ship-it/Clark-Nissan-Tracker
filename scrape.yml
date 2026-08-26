@@ -1,0 +1,36 @@
+name: Scrape Clark Nissan Inventory
+
+on:
+  schedule:
+    # Runs every day at 11:00 UTC (~5-6am Texas time). Edit this to change frequency.
+    - cron: '0 11 * * *'
+  workflow_dispatch: {}  # lets you click "Run workflow" manually in the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Run scraper
+        run: python scraper.py
+
+      - name: Commit and push updated data
+        run: |
+          git config user.name "inventory-bot"
+          git config user.email "actions@github.com"
+          git add data/
+          git diff --quiet --cached || git commit -m "Update inventory snapshot $(date -u +%Y-%m-%d)"
+          git push
