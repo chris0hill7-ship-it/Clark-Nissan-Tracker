@@ -45,24 +45,32 @@ def get_total_results(soup):
     return int(match.group(1).replace(",", "")) if match else None
 
 
-def parse_vehicle_block(anchor, inventory_type):
+def parse_vehicle_block(anchor, inventory_type, debug=False):
     href = anchor.get("href", "")
     text = re.sub(r"\s+", " ", anchor.get_text(" ", strip=True))
 
-    def find(pattern, flags=0):
+    if debug:
+        print("    ---- RAW ANCHOR TEXT (debug) ----")
+        print("    " + text[:600])
+        print("    ---- END RAW TEXT ----")
+
+    def find(pattern, flags=re.I):
         m = re.search(pattern, text, flags)
         return m.group(1).strip() if m else None
 
-    vin = find(r"\bvin([A-HJ-NPR-Z0-9]{17})\b")
-    stock = find(r"Stock #([A-Za-z0-9\-]+)")
-    final_price = find(r"Final Price\$?([\d,]+)")
-    selling_price = find(r"Selling Price\$?([\d,]+)")
-    exterior = find(r"Exterior(.+?)Interior")
-    interior = find(r"Interior(.+?)Transmission")
-    transmission = find(r"Transmission(\w+)")
-    mileage = find(r"Mileage\s*([\d,]+)\s*Miles")
-    certified = "certified logo" in text.lower() or "/cpo/" in href
-    carfax_one_owner = "carfax one owner" in text.lower()
+    vin = find(r"\bvin\s*[:#]?\s*([A-HJ-NPR-Z0-9]{17})\b")
+    stock = find(r"stock\s*#?\s*[:]?\s*([A-Za-z0-9\-]+)")
+    final_price = find(r"final\s*price\s*\$?\s*([\d,]+)")
+    selling_price = find(r"(?:selling|our)\s*price\s*\$?\s*([\d,]+)")
+    if not selling_price:
+        # fallback: any standalone dollar amount in the blob
+        selling_price = find(r"\$\s*([\d]{2,3},\d{3})\b")
+    exterior = find(r"exterior\s*[:]?\s*(.+?)\s*interior", re.I)
+    interior = find(r"interior\s*[:]?\s*(.+?)\s*transmission", re.I)
+    transmission = find(r"transmission\s*[:]?\s*(\w+)")
+    mileage = find(r"mileage\s*[:]?\s*([\d,]+)\s*miles")
+    certified = "certified" in text.lower() or "/cpo/" in href
+    carfax_one_owner = "carfax one owner" in text.lower() or "one owner" in text.lower()
 
     title_blob = text.split("Final Price")[0].strip()
     half = len(title_blob) // 2
@@ -70,7 +78,7 @@ def parse_vehicle_block(anchor, inventory_type):
     title = first_half if first_half and first_half == second_half else title_blob
 
     year = make = model = trim = None
-    m = re.match(r"(\d{4})\s+(\S+)\s+(.+)", title)
+    m = re.match(r"(\d{4})\s+(\S+)\s+(.+)", title, re.I)
     if m:
         year, make = m.group(1), m.group(2)
         rest = m.group(3).strip().split(" ", 1)
@@ -164,8 +172,8 @@ def scrape_section(page, path, inventory_type):
 
         anchors = [a for a in soup.find_all("a", href=True) if "/viewdetails/" in a["href"]]
         new_count = 0
-        for a in anchors:
-            vehicle = parse_vehicle_block(a, inventory_type)
+        for i, a in enumerate(anchors):
+            vehicle = parse_vehicle_block(a, inventory_type, debug=(i == 0 and page_num == 1))
             key = vehicle["vin"] or vehicle["url"]
             if key in seen_vins:
                 continue
