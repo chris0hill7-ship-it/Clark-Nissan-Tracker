@@ -2,9 +2,13 @@ name: Scrape Clark Nissan Inventory
 
 on:
   schedule:
-    - cron: '0 5 * * *'
-    - cron: '0 6 * * *'
-  workflow_dispatch:
+    # Runs every day at 11:00 UTC (~5-6am Texas time). Edit this to change frequency.
+    - cron: '0 11 * * *'
+  workflow_dispatch: {}  # lets you click "Run workflow" manually in the Actions tab
+
+concurrency:
+  group: scrape-inventory
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -12,49 +16,29 @@ permissions:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Check whether it is midnight Central
-        id: timecheck
-        run: |
-          HOUR=$(TZ=America/Chicago date +%H)
-          if [ "$HOUR" = "00" ]; then
-            echo "run_scraper=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run_scraper=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Check out repo
-        if: steps.timecheck.outputs.run_scraper == 'true' || github.event_name == 'workflow_dispatch'
         uses: actions/checkout@v4
 
       - name: Set up Python
-        if: steps.timecheck.outputs.run_scraper == 'true' || github.event_name == 'workflow_dispatch'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Upgrade pip
-        if: steps.timecheck.outputs.run_scraper == 'true' || github.event_name == 'workflow_dispatch'
-        run: python -m pip install --upgrade pip
+      - name: Install dependencies
+        run: pip install playwright beautifulsoup4
 
-      - name: Install Python dependencies
-        if: steps.timecheck.outputs.run_scraper == 'true' || github.event_name == 'workflow_dispatch'
-        run: python -m pip install playwright beautifulsoup4
-
-      - name: Install Playwright Chromium
-        if: steps.timecheck.outputs.run_scraper == 'true' || github.event_name == 'workflow_dispatch'
-        run: python -m playwright install --with-deps chromium
+      - name: Install Playwright browser
+        run: playwright install --with-deps chromium
 
       - name: Run scraper
-        if: steps.timecheck.outputs.run_scraper == 'true' || github.event_name == 'workflow_dispatch'
         run: python scraper.py
 
       - name: Commit and push updated data
-        if: steps.timecheck.outputs.run_scraper == 'true' || github.event_name == 'workflow_dispatch'
         run: |
           git config user.name "inventory-bot"
           git config user.email "actions@github.com"
           git add data/
           git diff --quiet --cached || git commit -m "Update inventory snapshot $(date -u +%Y-%m-%d)"
+          git pull --rebase origin main
           git push
