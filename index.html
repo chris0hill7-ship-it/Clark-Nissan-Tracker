@@ -105,7 +105,18 @@
     <option value="year_desc">Sort: Newest Year</option>
   </select>
   <input type="text" id="searchBox" placeholder="Search year, make, model, VIN…">
+  <button class="btn ghost" id="featureBtn">Features <span id="featureCount"></span></button>
   <span class="updated-line" id="updatedLine"></span>
+</div>
+
+<div id="featurePanel" style="display:none; max-width:1200px; margin:12px auto 0; padding:0 24px;">
+  <div style="background:var(--panel); border:1px solid var(--line); border-radius:3px; padding:14px;">
+    <input type="text" id="featureSearch" placeholder="Search features (e.g. ventilated, carplay, third row)…" style="width:100%; margin-bottom:10px;">
+    <div id="featureList" style="max-height:220px; overflow-y:auto; display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:4px 14px;"></div>
+    <div style="margin-top:10px; display:flex; gap:8px;">
+      <button class="btn ghost" id="clearFeaturesBtn" style="font-size:12px; padding:6px 12px;">Clear Selected</button>
+    </div>
+  </div>
 </div>
 
 <div class="diffbar" id="diffBar"></div>
@@ -120,6 +131,60 @@
 <script>
 let latestData = null, previousData = null;
 let diffs = { added: [], removed: [], priceChanges: {} };
+let selectedFeatures = new Set();
+
+function buildFeatureVocabulary(){
+  const set = new Set();
+  (latestData ? latestData.vehicles : []).forEach(v => {
+    (v.features || []).forEach(f => set.add(f));
+  });
+  return Array.from(set).sort();
+}
+
+function renderFeatureList(){
+  const vocab = buildFeatureVocabulary();
+  const q = document.getElementById('featureSearch').value.trim().toLowerCase();
+  const filtered = q ? vocab.filter(f => f.toLowerCase().includes(q)) : vocab;
+  const list = document.getElementById('featureList');
+  if (!vocab.length){
+    list.innerHTML = '<div style="color:var(--chrome-dim); font-size:12px; grid-column:1/-1;">No feature data yet — this appears after the scraper has visited vehicle detail pages.</div>';
+    return;
+  }
+  list.innerHTML = filtered.slice(0, 300).map(f => {
+    const checked = selectedFeatures.has(f) ? 'checked' : '';
+    const id = 'feat_' + btoa(unescape(encodeURIComponent(f))).replace(/[^a-zA-Z0-9]/g,'');
+    return `<label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--chrome); cursor:pointer;">
+      <input type="checkbox" data-feature="${f.replace(/"/g,'&quot;')}" ${checked}> ${f}
+    </label>`;
+  }).join('');
+  list.querySelectorAll('input[type=checkbox]').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const f = cb.getAttribute('data-feature');
+      if (cb.checked) selectedFeatures.add(f); else selectedFeatures.delete(f);
+      updateFeatureCount();
+      render();
+    });
+  });
+}
+
+function updateFeatureCount(){
+  const el = document.getElementById('featureCount');
+  el.textContent = selectedFeatures.size ? `(${selectedFeatures.size})` : '';
+}
+
+document.getElementById('featureBtn').addEventListener('click', () => {
+  const panel = document.getElementById('featurePanel');
+  const isHidden = panel.style.display === 'none';
+  panel.style.display = isHidden ? 'block' : 'none';
+  if (isHidden) renderFeatureList();
+});
+document.getElementById('featureSearch').addEventListener('input', renderFeatureList);
+document.getElementById('clearFeaturesBtn').addEventListener('click', () => {
+  selectedFeatures.clear();
+  updateFeatureCount();
+  renderFeatureList();
+  render();
+});
 
 async function fetchJSON(path){
   const res = await fetch(path + '?_=' + Date.now());
@@ -189,6 +254,7 @@ function vehicleCard(v){
       <div>Ext <b>${v.exterior_color||'—'}</b></div>
       <div>Int <b>${v.interior_color||'—'}</b></div>
     </div>
+    ${selectedFeatures.size ? `<div style="font-size:10.5px; color:var(--chrome); line-height:1.5;">${Array.from(selectedFeatures).map(f => `✓ ${f}`).join('<br>')}</div>` : ''}
     <div class="vin-row"><span>VIN ${v.vin||'—'}</span><span>#${v.stock||'—'}</span></div>
     ${v.url ? `<a class="viewlink" href="${v.url}" target="_blank" rel="noopener">View Listing</a>` : ''}
   </div>`;
@@ -203,6 +269,13 @@ function render(){
   let vehicles = latestData.vehicles.slice();
   const q = document.getElementById('searchBox').value.trim().toLowerCase();
   if (q) vehicles = vehicles.filter(v => [v.year,v.make,v.model,v.trim,v.vin,v.stock].join(' ').toLowerCase().includes(q));
+
+  if (selectedFeatures.size){
+    vehicles = vehicles.filter(v => {
+      const owned = new Set(v.features || []);
+      return Array.from(selectedFeatures).every(f => owned.has(f));
+    });
+  }
 
   const sortBy = document.getElementById('sortBy').value;
   vehicles.sort((a,b) => {

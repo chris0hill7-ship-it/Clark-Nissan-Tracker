@@ -1,517 +1,227 @@
 #!/usr/bin/env python3
+"""
+Clark Nissan of Abilene - inventory scraper
+=============================================
+
+Pulls new + used inventory from abilenenissan.com and writes it into
+data/snapshots/<date>.json, updates data/latest.json, and updates
+data/manifest.json (a list of all snapshots taken so far).
+
+The dealer site loads its vehicle listings with JavaScript after the
+initial page load, so this uses Playwright (a real headless browser)
+to render each page before reading it, rather than a plain HTTP request.
+
+    pip install playwright beautifulsoup4
+    playwright install --with-deps chromium
+    python scraper.py
+
+NOTE ON RELIABILITY
+--------------------
+If the dealer site changes its page structure, this may need small
+selector tweaks in parse_vehicle_block().
+"""
 
 import json
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlencode, urljoin
 
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-
+from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 BASE_URL = "https://www.abilenenissan.com"
-
-INVENTORY_SECTIONS = {
-    "new": "/inventory/new/nissan/",
-    "used": "/inventory/used/",
-}
-
+INVENTORY_SECTIONS = {"new": "/inventory/new", "used": "/inventory/used"}
 MAX_PAGES_SAFETY = 25
-MAX_SNAPSHOTS_KEPT = 60
+MAX_SNAPSHOTS_KEPT = 60  # keep repo size sane
 
 DATA_DIR = Path(__file__).parent / "data"
 SNAPSHOTS_DIR = DATA_DIR / "snapshots"
 
 
-def clean(text):
-    if not text:
-        return None
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def find_first(patterns, text, flags=re.I):
-    for pattern in patterns:
-        match = re.search(pattern, text, flags)
-        if match:
-            return clean(match.group(1))
-    return None
-
-
-def money_to_int(value):
-    if not value:
-        return None
-
-    value = re.sub(r"[^\d]", "", value)
-
-    try:
-        return int(value)
-    except ValueError:
-        return None
-
-
-def number_to_int(value):
-    if not value:
-        return None
-
-    value = value.replace(",", "").strip()
-
-    try:
-        return int(value)
-    except ValueError:
-        return None
-
-
-def get_total_results(text):
-    match = re.search(
-        r"Results:\s*([\d,]+)\s*Vehicles",
-        text,
-        re.I,
-    )
-
-    if not match:
-        return None
-
-    return int(match.group(1).replace(",", ""))
-
-
-def extract_vehicle_links(page):
-    """
-    Pull vehicle detail URLs from the rendered inventory page.
-    The VIN is embedded in Clark Nissan's /viewdetails/ URLs.
-    """
-
-    links = page.locator('a[href*="/viewdetails/"]')
-
-    results = []
-
-    for i in range(links.count()):
-        href = links.nth(i).get_attribute("href")
-
-        if not href:
-            continue
-
-        href = urljoin(BASE_URL, href)
-
-        match = re.search(
-            r"/viewdetails/(?:new|used)/([A-HJ-NPR-Z0-9]{17})",
-            href,
-            re.I,
-        )
-
-        if not match:
-            continue
-
-        vin = match.group(1).upper()
-
-        results.append({
-            "vin": vin,
-            "url": href,
-        })
-
-    # Deduplicate by VIN
-    unique = {}
-
-    for vehicle in results:
-        unique[vehicle["vin"]] = vehicle
-
-    return list(unique.values())
-
-
-def parse_vehicle_detail(page, vehicle, inventory_type):
-    """
-    Visit a vehicle detail page and pull the important inventory fields.
-    """
-
-    url = vehicle["url"]
-    vin = vehicle["vin"]
-
-    print(f"    {vin}")
-
-    try:
-        page.goto(
-            url,
-            wait_until="domcontentloaded",
-            timeout=45000,
-        )
-
-        # Give JavaScript inventory widgets time to populate.
-        page.wait_for_timeout(1500)
-
-    except PlaywrightTimeoutError:
-        print(f"      WARNING: timeout loading {url}", file=sys.stderr)
-
-    try:
-        body = clean(page.locator("body").inner_text(timeout=10000)) or ""
-    except Exception:
-        body = ""
-
-    # --------------------------
-    # Vehicle title
-    # --------------------------
-
-    title = None
-
-    try:
-        headings = page.locator("h1, h2, h3")
-
-        for i in range(min(headings.count(), 30)):
-            candidate = clean(headings.nth(i).inner_text())
-
-            if candidate and re.search(r"\b20\d{2}\b", candidate):
-                title = candidate
-                break
-
-    except Exception:
-        pass
-
-    # Fallback to page title
-    if not title:
-        try:
-            page_title = clean(page.title())
-
-            match = re.search(
-                r"(20\d{2}\s+.+?)(?:\s+for Sale|\s+\||$)",
-                page_title,
-                re.I,
-            )
-
-            if match:
-                title = clean(match.group(1))
-
-        except Exception:
-            pass
-
-    # --------------------------
-    # Break title into fields
-    # --------------------------
-
-    year = None
-    make = None
-    model = None
-    trim = None
-
-    if title:
-        match = re.search(
-            r"\b(20\d{2}|19\d{2})\s+([A-Za-z]+)\s+([^\s]+)(?:\s+(.+))?",
-            title,
-        )
-
-        if match:
-            year = match.group(1)
-            make = match.group(2)
-            model = match.group(3)
-            trim = clean(match.group(4))
-
-    # --------------------------
-    # Stock number
-    # --------------------------
-
-    stock = find_first(
-        [
-            r"Stock\s*#\s*:?\s*([A-Z0-9\-]+)",
-            r"Stock\s*No\.?\s*:?\s*([A-Z0-9\-]+)",
-            r"Stock Number\s*:?\s*([A-Z0-9\-]+)",
-        ],
-        body,
-    )
-
-    # --------------------------
-    # Mileage
-    # --------------------------
-
-    mileage = find_first(
-        [
-            r"Mileage\s*:?\s*([\d,]+)",
-            r"([\d,]+)\s*(?:miles|mi)\b",
-        ],
-        body,
-    )
-
-    mileage = number_to_int(mileage)
-
-    # New vehicles should normally be effectively zero mileage.
-    if inventory_type == "new" and mileage and mileage > 10000:
-        mileage = None
-
-    # --------------------------
-    # Price
-    # --------------------------
-
-    price = find_first(
-        [
-            r"Your Price\s*\$([\d,]+)",
-            r"Final Price\s*\$([\d,]+)",
-            r"Selling Price\s*\$([\d,]+)",
-            r"Internet Price\s*\$([\d,]+)",
-        ],
-        body,
-    )
-
-    final_price = money_to_int(price)
-
-    # --------------------------
-    # MSRP
-    # --------------------------
-
-    msrp = find_first(
-        [
-            r"MSRP\s*\$([\d,]+)",
-        ],
-        body,
-    )
-
-    msrp = money_to_int(msrp)
-
-    # --------------------------
-    # Colors
-    # --------------------------
-
-    exterior = find_first(
-        [
-            r"Exterior\s*:?\s*(.+?)\s+Interior\b",
-            r"Exterior Color\s*:?\s*(.+?)\s+Interior",
-        ],
-        body,
-    )
-
-    interior = find_first(
-        [
-            r"Interior\s*:?\s*(.+?)\s+(?:Transmission|Engine|Drivetrain|Fuel)",
-            r"Interior Color\s*:?\s*(.+?)\s+(?:Transmission|Engine|Drivetrain|Fuel)",
-        ],
-        body,
-    )
-
-    # Prevent accidental giant chunks of page text
-    if exterior and len(exterior) > 80:
-        exterior = None
-
-    if interior and len(interior) > 80:
-        interior = None
-
-    # --------------------------
-    # Transmission
-    # --------------------------
-
-    transmission = find_first(
-        [
-            r"Transmission\s*:?\s*(.+?)\s+(?:Engine|Drivetrain|Fuel|VIN|Stock)",
-        ],
-        body,
-    )
-
-    if transmission and len(transmission) > 80:
-        transmission = None
-
-    # --------------------------
-    # Certified / Carfax flags
-    # --------------------------
-
-    lower_body = body.lower()
-
-    certified = (
-        "certified pre-owned" in lower_body
-        or "certified pre owned" in lower_body
-        or "nissan certified" in lower_body
-    )
-
-    carfax_one_owner = (
-        "carfax one owner" in lower_body
-        or "one owner" in lower_body
-    )
-
-    # --------------------------
-    # Body type from URL slug
-    # --------------------------
+def get_total_results(soup):
+    match = re.search(r"Results:\s*([\d,]+)\s*Vehicles", soup.get_text(" "), re.I)
+    return int(match.group(1).replace(",", "")) if match else None
+
+
+def parse_vehicle_block(anchor, inventory_type):
+    href = anchor.get("href", "")
+    text = re.sub(r"\s+", " ", anchor.get_text(" ", strip=True))
+
+    def find(pattern, flags=0):
+        m = re.search(pattern, text, flags)
+        return m.group(1).strip() if m else None
+
+    vin = find(r"\bvin([A-HJ-NPR-Z0-9]{17})\b")
+    stock = find(r"Stock #([A-Za-z0-9\-]+)")
+    final_price = find(r"Final Price\$?([\d,]+)")
+    selling_price = find(r"Selling Price\$?([\d,]+)")
+    exterior = find(r"Exterior(.+?)Interior")
+    interior = find(r"Interior(.+?)Transmission")
+    transmission = find(r"Transmission(\w+)")
+    mileage = find(r"Mileage\s*([\d,]+)\s*Miles")
+    certified = "certified logo" in text.lower() or "/cpo/" in href
+    carfax_one_owner = "carfax one owner" in text.lower()
+
+    title_blob = text.split("Final Price")[0].strip()
+    half = len(title_blob) // 2
+    first_half, second_half = title_blob[:half].strip(), title_blob[half:].strip()
+    title = first_half if first_half and first_half == second_half else title_blob
+
+    year = make = model = trim = None
+    m = re.match(r"(\d{4})\s+(\S+)\s+(.+)", title)
+    if m:
+        year, make = m.group(1), m.group(2)
+        rest = m.group(3).strip().split(" ", 1)
+        model = rest[0]
+        trim = rest[1] if len(rest) > 1 else None
 
     body_type = None
-
-    slug = url.lower()
-
-    body_types = {
-        "sport-utility": "sport utility",
-        "suv": "suv",
-        "crew-cab": "crew cab pickup",
-        "pickup": "pickup",
-        "sedan": "sedan",
-        "hatchback": "hatchback",
-        "crossover": "crossover",
-        "van": "van",
-        "convertible": "convertible",
-    }
-
-    for slug_piece, readable in body_types.items():
-        if slug_piece in slug:
-            body_type = readable
-            break
+    slug_match = re.search(r"/viewdetails/[^/]+/[^/]+/[^/]+", href)
+    if slug_match:
+        body_match = re.search(
+            r"(sport-utility|pickup|4dr-car|hatchback|crew-cab-pickup|van|convertible)",
+            slug_match.group(0),
+        )
+        if body_match:
+            body_type = body_match.group(1).replace("-", " ")
 
     return {
-        "vin": vin,
-        "stock": stock,
-        "year": year,
-        "make": make,
-        "model": model,
-        "trim": trim,
-        "title": title,
-        "body_type": body_type,
-        "inventory_type": inventory_type,
-        "certified": certified,
-        "carfax_one_owner": carfax_one_owner,
-        "selling_price": final_price,
-        "final_price": final_price,
-        "msrp": msrp,
-        "mileage": mileage,
-        "exterior_color": exterior,
-        "interior_color": interior,
+        "vin": vin, "stock": stock, "year": year, "make": make, "model": model,
+        "trim": trim, "body_type": body_type, "inventory_type": inventory_type,
+        "certified": certified, "carfax_one_owner": carfax_one_owner,
+        "selling_price": int(selling_price.replace(",", "")) if selling_price else None,
+        "final_price": int(final_price.replace(",", "")) if final_price else None,
+        "mileage": int(mileage.replace(",", "")) if mileage else None,
+        "exterior_color": exterior, "interior_color": interior,
         "transmission": transmission,
-        "url": url,
+        "url": BASE_URL + href if href.startswith("/") else href,
     }
 
 
-def scrape_section(browser, path, inventory_type):
-    """
-    Render each inventory results page with Chromium, collect detail-page
-    URLs, then visit those pages to gather vehicle data.
-    """
+def scrape_vehicle_features(page, url):
+    """Visit a single vehicle's detail page and pull its feature/equipment list."""
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(800)
+        soup = BeautifulSoup(page.content(), "html.parser")
+    except Exception as e:
+        print(f"    could not load {url}: {e}", file=sys.stderr)
+        return []
 
-    context = browser.new_context(
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        viewport={"width": 1440, "height": 1000},
-    )
+    features = set()
+    heading_re = re.compile(r"features|options|equipment", re.I)
 
-    listing_page = context.new_page()
+    # Strategy 1: headings that mention features/options, grab list items nearby
+    for tag in ["h1", "h2", "h3", "h4", "h5", "h6", "button", "span", "div"]:
+        for heading in soup.find_all(tag, string=heading_re):
+            container = heading.find_parent(["div", "section"]) or heading.parent
+            if not container:
+                continue
+            for li in container.find_all("li"):
+                t = li.get_text(" ", strip=True)
+                if t and len(t) < 80:
+                    features.add(t)
 
-    vehicle_links = {}
+    # Strategy 2: any element whose class/id mentions "feature" or "option"
+    for el in soup.find_all(attrs={"class": re.compile(r"feature|option", re.I)}):
+        for li in el.find_all("li"):
+            t = li.get_text(" ", strip=True)
+            if t and len(t) < 80:
+                features.add(t)
+    for el in soup.find_all(attrs={"id": re.compile(r"feature|option", re.I)}):
+        for li in el.find_all("li"):
+            t = li.get_text(" ", strip=True)
+            if t and len(t) < 80:
+                features.add(t)
+
+    return sorted(features)
+
+
+def scrape_section(page, path, inventory_type):
+    vehicles, seen_vins = [], set()
     total_expected = None
 
-    for page_number in range(1, MAX_PAGES_SAFETY + 1):
-
-        params = {
-            "paymenttype": "cash",
-            "instock": "true",
-            "intransit": "true",
-            "inproduction": "true",
-            "page": page_number,
-        }
-
-        url = f"{BASE_URL}{path}?{urlencode(params)}"
-
-        print(f"  Loading page {page_number}: {url}")
+    for page_num in range(1, MAX_PAGES_SAFETY + 1):
+        url = (
+            f"{BASE_URL}{path}?paymenttype=cash&instock=true"
+            f"&intransit=true&inproduction=true&page={page_num}"
+        )
+        page.goto(url, wait_until="domcontentloaded", timeout=45000)
 
         try:
-            listing_page.goto(
-                url,
-                wait_until="domcontentloaded",
-                timeout=45000,
-            )
+            page.wait_for_selector('a[href*="/viewdetails/"]', timeout=15000)
+        except Exception:
+            print(f"  {path} page {page_num}: no vehicle links appeared, stopping")
+            break
 
-            # Let the site's JavaScript inventory component load.
-            listing_page.wait_for_timeout(3000)
+        page.wait_for_timeout(1000)  # let any lazy-loaded content settle
 
-            # Scroll to trigger lazy-loaded inventory cards.
-            listing_page.evaluate(
-                """
-                async () => {
-                    for (let i = 0; i < 8; i++) {
-                        window.scrollTo(0, document.body.scrollHeight);
-                        await new Promise(r => setTimeout(r, 400));
-                    }
-                    window.scrollTo(0, 0);
-                }
-                """
-            )
-
-            listing_page.wait_for_timeout(1000)
-
-        except PlaywrightTimeoutError:
-            print(
-                f"  WARNING: inventory page {page_number} timed out",
-                file=sys.stderr,
-            )
-
-        body_text = clean(listing_page.locator("body").inner_text()) or ""
-
+        soup = BeautifulSoup(page.content(), "html.parser")
         if total_expected is None:
-            total_expected = get_total_results(body_text)
+            total_expected = get_total_results(soup)
 
-            if total_expected:
-                print(f"  Site reports {total_expected} {inventory_type} vehicles.")
-
-        links = extract_vehicle_links(listing_page)
-
+        anchors = [a for a in soup.find_all("a", href=True) if "/viewdetails/" in a["href"]]
         new_count = 0
+        for a in anchors:
+            vehicle = parse_vehicle_block(a, inventory_type)
+            key = vehicle["vin"] or vehicle["url"]
+            if key in seen_vins:
+                continue
+            seen_vins.add(key)
+            vehicles.append(vehicle)
+            new_count += 1
 
-        for vehicle in links:
-            if vehicle["vin"] not in vehicle_links:
-                vehicle_links[vehicle["vin"]] = vehicle
-                new_count += 1
+        print(f"  {path} page {page_num}: +{new_count} (total {len(vehicles)})")
 
-        print(
-            f"  Page {page_number}: +{new_count} unique vehicles "
-            f"(total links: {len(vehicle_links)})"
-        )
-
-        # Stop if this page added nothing new.
         if new_count == 0:
             break
-
-        # Stop once we've collected the advertised number.
-        if total_expected and len(vehicle_links) >= total_expected:
+        if total_expected and len(vehicles) >= total_expected:
             break
 
-    listing_page.close()
-
-    print(
-        f"  Found {len(vehicle_links)} unique "
-        f"{inventory_type} vehicle URLs."
-    )
-
-    # Now visit vehicle detail pages.
-    detail_page = context.new_page()
-
-    vehicles = []
-
-    for vehicle in vehicle_links.values():
-        try:
-            parsed = parse_vehicle_detail(
-                detail_page,
-                vehicle,
-                inventory_type,
-            )
-
-            vehicles.append(parsed)
-
-        except Exception as exc:
-            print(
-                f"    ERROR parsing {vehicle['vin']}: {exc}",
-                file=sys.stderr,
-            )
-
-            # Keep the VIN and URL even if some detail parsing fails.
-            vehicles.append({
-                "vin": vehicle["vin"],
-                "inventory_type": inventory_type,
-                "url": vehicle["url"],
-            })
-
-    detail_page.close()
-    context.close()
+        time.sleep(1)
 
     return vehicles
 
 
-def save_snapshot(all_vehicles):
+def main():
     SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    now = datetime.now(timezone.utc)
-    scraped_at = now.isoformat()
-    date_str = now.strftime("%Y-%m-%d")
+    all_vehicles = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            )
+        )
+        for inv_type, path in INVENTORY_SECTIONS.items():
+            print(f"Scraping {inv_type} inventory...")
+            try:
+                all_vehicles.extend(scrape_section(page, path, inv_type))
+            except Exception as e:
+                print(f"  ERROR scraping {path}: {e}", file=sys.stderr)
 
+        print(f"\nFetching feature details for {len(all_vehicles)} vehicles...")
+        for i, vehicle in enumerate(all_vehicles, 1):
+            if not vehicle.get("url"):
+                vehicle["features"] = []
+                continue
+            vehicle["features"] = scrape_vehicle_features(page, vehicle["url"])
+            if i % 10 == 0 or i == len(all_vehicles):
+                print(f"  {i}/{len(all_vehicles)} vehicles processed")
+            time.sleep(0.5)
+
+        browser.close()
+
+    if not all_vehicles:
+        print("No vehicles scraped — aborting without touching stored data.", file=sys.stderr)
+        sys.exit(1)
+
+    scraped_at = datetime.now(timezone.utc).isoformat()
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     snapshot = {
         "dealership": "Clark Nissan of Abilene",
         "source_url": BASE_URL,
@@ -521,128 +231,35 @@ def save_snapshot(all_vehicles):
     }
 
     snapshot_path = SNAPSHOTS_DIR / f"{date_str}.json"
-
-    with open(snapshot_path, "w", encoding="utf-8") as f:
+    with open(snapshot_path, "w") as f:
         json.dump(snapshot, f, indent=2)
 
     latest_path = DATA_DIR / "latest.json"
-
-    with open(latest_path, "w", encoding="utf-8") as f:
+    with open(latest_path, "w") as f:
         json.dump(snapshot, f, indent=2)
 
     manifest_path = DATA_DIR / "manifest.json"
-
     manifest = []
-
     if manifest_path.exists():
         try:
-            manifest = json.loads(
-                manifest_path.read_text(encoding="utf-8")
-            )
-        except (json.JSONDecodeError, OSError):
+            manifest = json.loads(manifest_path.read_text())
+        except json.JSONDecodeError:
             manifest = []
+    manifest = [m for m in manifest if m.get("date") != date_str]
+    manifest.append({"date": date_str, "file": f"snapshots/{date_str}.json",
+                      "count": len(all_vehicles), "scraped_at": scraped_at})
+    manifest.sort(key=lambda m: m["date"], reverse=True)
 
-    # Replace today's entry if workflow runs more than once.
-    manifest = [
-        item
-        for item in manifest
-        if item.get("date") != date_str
-    ]
-
-    manifest.append({
-        "date": date_str,
-        "file": f"snapshots/{date_str}.json",
-        "count": len(all_vehicles),
-        "scraped_at": scraped_at,
-    })
-
-    manifest.sort(
-        key=lambda item: item["date"],
-        reverse=True,
-    )
-
-    # Delete snapshots beyond retention limit.
     for old in manifest[MAX_SNAPSHOTS_KEPT:]:
         old_file = DATA_DIR / old["file"]
-
         if old_file.exists():
             old_file.unlink()
-
     manifest = manifest[:MAX_SNAPSHOTS_KEPT]
 
-    with open(manifest_path, "w", encoding="utf-8") as f:
+    with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
 
-    print(
-        f"\nDone. {len(all_vehicles)} vehicles saved for {date_str}."
-    )
-
-
-def main():
-    all_vehicles = []
-
-    with sync_playwright() as playwright:
-
-        browser = playwright.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
-        )
-
-        try:
-            for inventory_type, path in INVENTORY_SECTIONS.items():
-
-                print(
-                    f"\nScraping {inventory_type} inventory..."
-                )
-
-                try:
-                    vehicles = scrape_section(
-                        browser,
-                        path,
-                        inventory_type,
-                    )
-
-                    all_vehicles.extend(vehicles)
-
-                    print(
-                        f"  Scraped {len(vehicles)} "
-                        f"{inventory_type} vehicles."
-                    )
-
-                except Exception as exc:
-                    print(
-                        f"ERROR scraping {inventory_type}: {exc}",
-                        file=sys.stderr,
-                    )
-
-        finally:
-            browser.close()
-
-    # Important safety check:
-    # never overwrite good inventory with an empty scrape.
-    if not all_vehicles:
-        print(
-            "\nNo vehicles scraped — aborting without "
-            "touching stored inventory.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    # Remove duplicate VINs across all sections.
-    deduped = {}
-
-    for vehicle in all_vehicles:
-        vin = vehicle.get("vin")
-
-        if vin:
-            deduped[vin] = vehicle
-
-    all_vehicles = list(deduped.values())
-
-    save_snapshot(all_vehicles)
+    print(f"\nDone. {len(all_vehicles)} vehicles saved for {date_str}.")
 
 
 if __name__ == "__main__":
