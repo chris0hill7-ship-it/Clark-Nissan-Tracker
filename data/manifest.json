@@ -1,5 +1,11 @@
 [
   {
+    "date": "2026-10-03",
+    "file": "snapshots/2026-10-03.json",
+    "count": 64,
+    "scraped_at": "2026-10-03T15:06:32.453356+00:00"
+  },
+  {
     "date": "2026-10-02",
     "file": "snapshots/2026-10-02.json",
     "count": 64,
